@@ -7,34 +7,12 @@ and position-specific scoring matrices.
 """
 
 import math
+import platform
 
 from Bio._py3k import range
 
 from Bio.Seq import Seq
 from Bio.Alphabet import IUPAC
-
-# Hack for Python 2.5, isnan and isinf were new in Python 2.6
-try:
-    from math import isnan as _isnan
-except ImportError:
-    def _isnan(value):
-        # This is tricky due to cross platform float differences
-        if str(value).lower() == "nan":
-            return True
-        return value != value
-try:
-    from math import isinf as _isinf
-except ImportError:
-    def _isinf(value):
-        # This is tricky due to cross platform float differences
-        if str(value).lower().endswith("inf"):
-            return True
-        return False
-# Hack for Python 2.5 on Windows:
-try:
-    _nan = float("nan")
-except ValueError:
-    _nan = 1e1000 / 1e1000
 
 
 class GenericPositionMatrix(dict):
@@ -328,13 +306,40 @@ class PositionWeightMatrix(GenericPositionMatrix):
                     if p > 0:
                         logodds = float("inf")
                     else:
-                        logodds = _nan
+                        logodds = float("nan")
                 values[letter].append(logodds)
         pssm = PositionSpecificScoringMatrix(alphabet, values)
         return pssm
 
 
 class PositionSpecificScoringMatrix(GenericPositionMatrix):
+
+    # Make sure that we use C-accelerated PWM calculations if running under CPython.
+    # Fall back to the slower Python implementation if Jython or IronPython.
+    try:
+        from . import _pwm
+        def _calculate(self, sequence, m, n):
+            logodds = [[self[letter][i] for letter in "ACGT"] for i in range(m)]
+            return self._pwm.calculate(sequence, logodds)
+    except ImportError:
+        if platform.python_implementation() == 'CPython':
+            raise
+        else:
+            def _calculate(self, sequence, m, n):
+                # The C code handles mixed case so Python version must too:
+                sequence = sequence.upper()
+                scores = []
+                for i in range(n - m + 1):
+                    score = 0.0
+                    for position in range(m):
+                        letter = sequence[i + position]
+                        try:
+                            score += self[letter][position]
+                        except KeyError:
+                            score = float("nan")
+                            break
+                    scores.append(score)
+                return scores
 
     def calculate(self, sequence):
         """Returns the PWM score for a given sequence for all positions.
@@ -361,29 +366,8 @@ class PositionSpecificScoringMatrix(GenericPositionMatrix):
         m = self.length
         n = len(sequence)
 
-        scores = []
-        # check if the fast C code can be used
-        try:
-            from . import _pwm
-        except ImportError:
-            # use the slower Python code otherwise
-            # The C code handles mixed case so Python version must too:
-            sequence = sequence.upper()
-            for i in range(n - m + 1):
-                score = 0.0
-                for position in range(m):
-                    letter = sequence[i + position]
-                    try:
-                        score += self[letter][position]
-                    except KeyError:
-                        score = _nan
-                        break
-                scores.append(score)
-        else:
-            # get the log-odds matrix into a proper shape
-            # (each row contains sorted (ACGT) log-odds values)
-            logodds = [[self[letter][i] for letter in "ACGT"] for i in range(m)]
-            scores = _pwm.calculate(sequence, logodds)
+        scores = self._calculate(sequence, m, n)
+
         if len(scores) == 1:
             return scores[0]
         else:
@@ -451,9 +435,9 @@ class PositionSpecificScoringMatrix(GenericPositionMatrix):
         for i in range(self.length):
             for letter in self._letters:
                 logodds = self[letter, i]
-                if _isnan(logodds):
+                if math.isnan(logodds):
                     continue
-                if _isinf(logodds) and logodds < 0:
+                if math.isinf(logodds) and logodds < 0:
                     continue
                 b = background[letter]
                 p = b * math.pow(2, logodds)
@@ -475,9 +459,9 @@ class PositionSpecificScoringMatrix(GenericPositionMatrix):
             sxx = 0.0
             for letter in self._letters:
                 logodds = self[letter, i]
-                if _isnan(logodds):
+                if math.isnan(logodds):
                     continue
-                if _isinf(logodds) and logodds < 0:
+                if math.isinf(logodds) and logodds < 0:
                     continue
                 b = background[letter]
                 p = b * math.pow(2, logodds)
